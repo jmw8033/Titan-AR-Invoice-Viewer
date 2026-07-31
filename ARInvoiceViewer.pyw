@@ -7,7 +7,7 @@ import winsound
 import os, pymssql, time, threading, re, queue, json, gc, csv
 
 # AR INVOICE DIRECTORY
-INVOICE_DIR = r"C:\Users\jmwesthoff\OneDrive - atlanticconcrete.com\Documents\Scripts\Logos"
+INVOICE_DIR = r"T:\Joey\AR Invoices"
 LOG_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_log.csv")
 invoice_re  = re.compile(r'(\d+)')
 
@@ -30,7 +30,7 @@ class InvoiceViewer(tk.Tk):
         self.broken_companies = []
         self.broken_invoices = []
         
-        self.by_customer_invoice = {}
+        self.by_invoice = {}
         self.missing_invoices = []
         self.duplicate_invoices = []
 
@@ -96,10 +96,14 @@ class InvoiceViewer(tk.Tk):
 
         # Match files with invoices
         t0 = time.perf_counter()
+        matched = set()
         for row in self.invoices:
-            try:
-                row["Filepath"] = file_index.pop((row["CustomerID"], row["InvoiceNum"]))
-            except:
+            invoice = str(row["InvoiceNum"]).strip()
+            filepath = file_index.get(invoice)
+            if filepath:
+                row["Filepath"] = filepath
+                matched.add(invoice)
+            else:
                 self.missing_invoices.append((row["CustomerID"], row["InvoiceNum"], row["InvoiceDate"].strftime("%m-%d-%Y")))
         t1 = time.perf_counter()
         self.loading_update(f"Invoice files loaded in {t1 - t0:.2f} seconds.")
@@ -107,10 +111,10 @@ class InvoiceViewer(tk.Tk):
         self.loading_update(f"{len(self.missing_invoices)} missing invoice files.", color="#FF0000")
 
         # Check for errors
-        if len(file_index) > 0:
-            for file in file_index:
-                self.broken_invoices.append(file_index[file])
-            self.loading_update(f"{len(file_index)} invoice files without matches.", color="#FF0000")
+        unmatched = [path for inv, path in file_index.items() if inv not in matched]
+        if unmatched:
+            self.broken_invoices.extend(unmatched)
+            self.loading_update(f"{len(unmatched)} invoice files without matches.", color="#FF0000")
 
         self.after(100, self.load_gui)
 
@@ -212,7 +216,7 @@ class InvoiceViewer(tk.Tk):
             
             seen_invoices = set()
             for row in self.invoices:
-                key = (row["CustomerID"], row["InvoiceNum"])
+                key = str(row["InvoiceNum"]).strip()
                 if key in seen_invoices:
                     self.duplicate_invoices.append(f"{row['CustomerID']} - {row['InvoiceNum']}")
                 else:
@@ -221,7 +225,7 @@ class InvoiceViewer(tk.Tk):
             self.broken_companies = [row for row in data if not (row["CustomerID"] and row["InvoiceNum"] and row["InvoiceDate"] 
                                      and row["Subtotal"] is not None)]
             self.customer_ids = {(row["CustomerID"], row["CompanyName"], row["CustomerID"] in self.ignore_list) for row in self.invoices if row["CustomerID"] and row["CompanyName"]}
-            self.by_customer_invoice = {(row["CustomerID"], row["InvoiceNum"]): row for row in self.invoices}
+            self.by_invoice = {str(row["InvoiceNum"]).strip(): row for row in self.invoices}
 
             t1 = time.perf_counter()
             self.loading_update(f"AR Invoice data loaded in {t1 - t0:.2f} seconds.")
@@ -238,15 +242,16 @@ class InvoiceViewer(tk.Tk):
         file_index = {}
         if os.path.exists(INVOICE_DIR):
             for file in os.scandir(INVOICE_DIR):
-                file_name = file.name
-                fname = file_name.split("_") # CUSTOMER_INVOICE_MM-DD-YYYY_RANDOMINT
-                if fname and len(fname) >= 3:
-                    if fname[0] == "PUCA":
-                        fname[0] = "PUCA_150"
-                        fname[1] = fname[2] 
-
-                    fname[1] = fname[1].replace("[slash]", "/").replace("[quote]", '"')
-                    file_index[(fname[0], fname[1])] = os.path.join(INVOICE_DIR, file_name)
+                if not file.is_file():
+                    continue
+                stem = os.path.splitext(file.name)[0]   # mm-dd-yy_invoice #
+                parts = stem.split("_", 1)
+                if len(parts) < 2:
+                    continue
+                invoice = parts[1].replace("[slash]", "/").replace("[quote]", '"').strip()
+                if not invoice:
+                    continue
+                file_index[invoice] = file.path
 
         t1 = time.perf_counter()
         self.loading_update(f"Invoice files scanned in {t1 - t0:.2f} seconds.")
@@ -610,7 +615,7 @@ class InvoiceViewer(tk.Tk):
         self.broken_companies.clear()
         self.broken_invoices.clear()
         
-        self.by_customer_invoice.clear()
+        self.by_invoice.clear()
         self.missing_invoices.clear()
         self.duplicate_invoices.clear()
 
