@@ -7,7 +7,7 @@ import winsound
 import os, pymssql, time, threading, re, queue, json, gc, csv
 
 # AR INVOICE DIRECTORY
-INVOICE_DIR = r"T:\Joey\AR Invoices"
+INVOICE_DIR = r"T:\AR\Sales\ACP\Invoices"
 LOG_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_log.csv")
 invoice_re  = re.compile(r'(\d+)')
 
@@ -240,18 +240,26 @@ class InvoiceViewer(tk.Tk):
     def load_files(self):
         t0 = time.perf_counter()
         file_index = {}
-        if os.path.exists(INVOICE_DIR):
-            for file in os.scandir(INVOICE_DIR):
-                if not file.is_file():
+
+        def scan(directory):
+            for entry in os.scandir(directory):
+                if entry.is_dir():
+                    scan(entry.path)      # year folder — go one level deeper
                     continue
-                stem = os.path.splitext(file.name)[0]   # mm-dd-yy_invoice #
+                stem = os.path.splitext(entry.name)[0]   # mm-dd-yy_invoice #
                 parts = stem.split("_", 1)
                 if len(parts) < 2:
                     continue
                 invoice = parts[1].replace("[slash]", "/").replace("[quote]", '"').strip()
                 if not invoice:
                     continue
-                file_index[invoice] = file.path
+                if invoice in file_index:
+                    self.broken_invoices.append(f"Duplicate file: {entry.path}")
+                    continue
+                file_index[invoice] = entry.path
+
+        if os.path.exists(INVOICE_DIR):
+            scan(INVOICE_DIR)
 
         t1 = time.perf_counter()
         self.loading_update(f"Invoice files scanned in {t1 - t0:.2f} seconds.")
