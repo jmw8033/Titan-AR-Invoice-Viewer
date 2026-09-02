@@ -27,6 +27,11 @@ class InvoiceViewer(tk.Tk):
         self.customer_ids = set() 
         self.sort_col = "Date"
         self.sort_desc = True 
+        self.current_rows = []
+        self.result_count = 0
+        self.displayed_count = 0
+        self.page_size = 500
+        self._loading_page = False
         self.broken_companies = []
         self.broken_invoices = []
         
@@ -147,6 +152,7 @@ class InvoiceViewer(tk.Tk):
             self.end_entry.set_date(self.saved_filters["end_date"])
             
             self.invoice_text.set(self.saved_filters["invoice"])
+            self.search_invoice_names.set(self.saved_filters["search_invoice_names"])
 
             self.sort_col
             
@@ -329,6 +335,10 @@ class InvoiceViewer(tk.Tk):
         self.clear_button = tk.Button(self.filter_frame, text="Clear Filters", command=self.clear_filters)
         self.clear_button.grid(row=1, column=3, padx=5, sticky="w")
 
+        self.search_invoice_names = tk.BooleanVar()
+        self.search_invoice_names_cb = ttk.Checkbutton(self.filter_frame, text="Search Invoice Names", variable=self.search_invoice_names, command=self.customer_entry.on_select, takefocus=False)
+        self.search_invoice_names_cb.grid(row=1, column=7, padx=5, sticky="w")
+
 
     def create_summary_bar(self):
         self.summary_frame = ttk.Frame(self, relief="groove", borderwidth=1, padding=(6, 4))
@@ -394,19 +404,61 @@ class InvoiceViewer(tk.Tk):
         self.tree.heading("Filepath", text="")
         self.tree.pack(side="left", fill="both", expand=True)
 
-        scrollbar = ttk.Scrollbar(self.tree_frame, command=self.tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree_scrollbar = ttk.Scrollbar(self.tree_frame, command=self.tree.yview)
+        self.tree_scrollbar.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=self._on_tree_scroll)
         self.tree.bind("<<TreeviewSelect>>", self.update_selected_sum)
-        
-        # Double click to open PDF
         self.tree.bind("<Double-1>", self.open_file)
 
         self.style.configure("Treeview", rowheight=20) 
         self.tree.tag_configure("oddrow",  background="#f7f7f7")
         self.tree.tag_configure("evenrow", background="#ffffff")
-        
-    
+
+
+    def _on_tree_scroll(self, first, last):
+        self.tree_scrollbar.set(first, last)
+        if self._loading_page or self.displayed_count >= len(self.current_rows):
+            return
+        try:
+            near_bottom = float(last) >= 0.92
+        except (TypeError, ValueError):
+            return
+        if near_bottom:
+            self.after_idle(self.load_more_rows)
+
+
+    def load_more_rows(self, reset=False):
+        if self._loading_page:
+            return
+        self._loading_page = True
+        try:
+            if reset:
+                self.tree.delete(*self.tree.get_children())
+                self.displayed_count = 0
+
+            start = self.displayed_count
+            end = min(start + self.page_size, len(self.current_rows))
+            for i in range(start, end):
+                row = self.current_rows[i]
+                tag = "evenrow" if i % 2 == 0 else "oddrow"
+                self.tree.insert("", "end", values=row, tags=tag)
+            self.displayed_count = end
+        finally:
+            self._loading_page = False
+        self.update_result_label()
+
+
+    def update_result_label(self):
+        total = self.result_count
+        if total == 0:
+            self.amount_label.config(text="No invoices found.")
+        elif total == 1:
+            self.amount_label.config(text="1 invoice found.")
+        elif self.displayed_count < total:
+            self.amount_label.config(text=f"{total:,} invoices found. Showing {self.displayed_count:,}.")
+        else:
+            self.amount_label.config(text=f"{total:,} invoices found.")
+
     def update_selected_sum(self, *_):
         total = 0
         for item in self.tree.selection():
@@ -423,103 +475,99 @@ class InvoiceViewer(tk.Tk):
         payments_total = 0
         values = []
 
-        # Formatting helper to place negative numbers inside parentheses
+        search = customer_input.lower()
+        invoice_search = invoice_prefix.lower()
+        invoice_anywhere = self.search_invoice_names.get()
+        search_names = self.search_names.get()
+        all_companies = self.all_companies.get()
+        pdf_only = self.pdf_only.get()
+        ignoring = self.ignoring
+        ignore_list = self.ignore_list
+        start_date = self.start_entry.get_date()
+        end_date = self.end_entry.get_date()
+
         fmt = lambda x: "$0.00" if not x else (f"${x:,.2f}" if x >= 0 else f"(${abs(x):,.2f})")
 
         for entry in self.invoices:
             customer = str(entry["CustomerID"])
-            if self.ignoring and customer in self.ignore_list:
+            if ignoring and customer in ignore_list:
                 continue
-            search = customer_input.lower()
-            name_match = self.search_names.get() and bool(search) and search in str(entry["CompanyName"]).lower()
-            if self.all_companies.get():
-                if search and not (customer.lower().startswith(search) or name_match):
+
+            company_name = str(entry["CompanyName"])
+            customer_l = customer.lower()
+            name_match = search_names and bool(search) and search in company_name.lower()
+            if all_companies:
+                if search and not (customer_l.startswith(search) or name_match):
                     continue
-            else:
-                if not (customer.lower() == search or name_match):
-                    continue
+            elif not (customer_l == search or name_match):
+                continue
 
             invoice = str(entry["InvoiceNum"])
             date = entry["InvoiceDate"].date()
-            if date < self.start_entry.get_date() or date > self.end_entry.get_date():
+            if date < start_date or date > end_date:
                 continue
 
             filepath = entry.get("Filepath", "")
             has_filepath = "✔" if filepath else ""
-            if self.pdf_only.get() == 1 and not has_filepath:
+            if pdf_only and not filepath:
                 continue
 
-            if not invoice.lower().startswith(invoice_prefix.lower()):
+            inv_l = invoice.lower()
+            if invoice_anywhere:
+                if invoice_search not in inv_l:
+                    continue
+            elif not inv_l.startswith(invoice_search):
                 continue
-                
-            company_name = entry["CompanyName"]
-            
+
             state_val = entry.get('County', "")
             state = str(state_val).strip() if state_val is not None else ""
-            
-            sub_amt = entry.get('Subtotal', 0)
-            tax_amt = entry.get('Tax', 0)
-            disc_amt = entry.get('Discounts', 0)
-            tot_amt = entry.get('Total', 0)
-            pay_amt = entry.get('Payments', 0)
+            sub_amt = entry.get('Subtotal', 0) or 0
+            tax_amt = entry.get('Tax', 0) or 0
+            disc_amt = entry.get('Discounts', 0) or 0
+            tot_amt = entry.get('Total', 0) or 0
+            pay_amt = entry.get('Payments', 0) or 0
             is_closed = entry.get('Closed', False)
 
-            if disc_amt is None:
-                disc_amt = 0
-            invoice_total += tot_amt - disc_amt if tot_amt else 0
-            payments_total += pay_amt if pay_amt else 0
+            invoice_total += tot_amt - disc_amt
+            payments_total += pay_amt
 
-            # Formatting Data
-            subtotal = fmt(sub_amt)
-            tax = fmt(tax_amt)
-            discount = fmt(disc_amt)
-            total = fmt(tot_amt)
-            payments = fmt(pay_amt)
-            closed_str = "Yes" if is_closed else "No"
-
-            values.append((customer, company_name, invoice, date, state, subtotal, tax, discount, total, payments, closed_str, has_filepath, filepath))
+            values.append((customer, company_name, invoice, date, state,
+                           fmt(sub_amt), fmt(tax_amt), fmt(disc_amt), fmt(tot_amt), fmt(pay_amt),
+                           "Yes" if is_closed else "No", has_filepath, filepath))
             invoice_count += 1
 
         ar_total = invoice_total - payments_total
-
         self.invoice_total.set(f"Invoice Total: {fmt(invoice_total)}")
         self.payments_total.set(f"Payments Total: {fmt(payments_total)}")
         self.ar_total.set(f"AR Total: {fmt(ar_total)}")
-
         return invoice_count, values
 
+    def filter_rows(self, customer_input, invoice_prefix):
+        company_l = customer_input.lower()
+        invoice_search = invoice_prefix.lower()
+        invoice_anywhere = self.search_invoice_names.get()
+        search_names = self.search_names.get()
 
-    def filter_rows(self, customer_input, invoice_prefix): 
-        invoice_total = 0
-        payments_total = 0
-        i = 1
+        def keep(row):
+            company_ok = row[0].lower().startswith(company_l) or (search_names and company_l in row[1].lower())
+            inv_l = row[2].lower()
+            invoice_ok = invoice_search in inv_l if invoice_anywhere else inv_l.startswith(invoice_search)
+            return company_ok and invoice_ok
 
-        for row in self.tree.get_children():
-            values = self.tree.item(row, "values")
-            company_l = customer_input.lower()
-            company_ok = values[0].lower().startswith(company_l) or (self.search_names.get() and company_l in values[1].lower())
-            
-            # Index 2 is Invoice
-            if not company_ok or not values[2].lower().startswith(invoice_prefix.lower()):
-                self.tree.delete(row)
+        self.current_rows = [row for row in self.current_rows if keep(row)]
+        self.result_count = len(self.current_rows)
 
-        for row in self.tree.get_children():
-            i += 1
-            tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.tree.item(row, tags=tag)
-            
-            invoice_total += float(self.tree.set(row, "Total").replace("$", "").replace("(", "-").replace(",", "").replace(")", ""))
-            payments_total += float(self.tree.set(row, "Payments").replace("$", "").replace("(", "-").replace(",", "").replace(")", ""))
-
+        money = lambda s: float(s.replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if s else 0.0
+        invoice_total = sum(money(row[8]) for row in self.current_rows)
+        payments_total = sum(money(row[9]) for row in self.current_rows)
         ar_total = invoice_total - payments_total
-        
         fmt = lambda x: "$0.00" if not x else (f"${x:,.2f}" if x >= 0 else f"(${abs(x):,.2f})")
         self.invoice_total.set(f"Invoice Total: {fmt(invoice_total)}")
         self.payments_total.set(f"Payments Total: {fmt(payments_total)}")
         self.ar_total.set(f"AR Total: {fmt(ar_total)}")
-        
-        return len(self.tree.get_children())
-    
+
+        self.load_more_rows(reset=True)
+        return self.result_count
 
     def clear_filters(self):
         self.customer_entry.delete(0, "end")
@@ -536,60 +584,54 @@ class InvoiceViewer(tk.Tk):
                 self.sort_desc = not self.sort_desc
             else:
                 self.sort_col = col
-                self.sort_desc = True   
+                self.sort_desc = True
 
-        if not values:
-            values = [self.tree.item(i, "values") for i in self.tree.get_children()]
+        if values is not None:
+            self.current_rows = list(values)
+            self.result_count = len(self.current_rows)
 
         def invoice_key(inv):
             if inv.isdigit():
                 return [(0, int(inv))]
-            key = []
             return [(1,)] + [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in invoice_re.split(inv) if p]
 
+        money = lambda s: float(s.replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if s else 0
         keymap = {
             "Customer": lambda x: x[0],
             "Company Name": lambda x: x[1],
             "Invoice": lambda x: invoice_key(str(x[2])),
             "Date": lambda x: x[3],
             "State": lambda x: str(x[4]),
-            "Subtotal": lambda x: float(x[5].replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if x[5] else 0,
-            "Tax": lambda x: float(x[6].replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if x[6] else 0,
-            "Discount": lambda x: float(x[7].replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if x[7] else 0,
-            "Total": lambda x: float(x[8].replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if x[8] else 0,
-            "Payments": lambda x: float(x[9].replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if x[9] else 0,
+            "Subtotal": lambda x: money(x[5]),
+            "Tax": lambda x: money(x[6]),
+            "Discount": lambda x: money(x[7]),
+            "Total": lambda x: money(x[8]),
+            "Payments": lambda x: money(x[9]),
             "Closed": lambda x: str(x[10]),
             "File Available": lambda x: x[11]
         }
         reverse = self.sort_desc
-        if col == "Customer" or col == "Invoice" or col == "Company Name":
+        if col in ("Customer", "Invoice", "Company Name"):
             reverse = not reverse
 
         if watch_cursor:
             self.config(cursor="watch")
             self.tree.config(cursor="watch")
-            self.after(25, lambda: self.sort(col, values, keymap, reverse))
+            self.after(25, lambda: self.sort(col, keymap, reverse))
         else:
-            self.sort(col, values, keymap, reverse)
+            self.sort(col, keymap, reverse)
 
 
-    def sort(self, col, values, keymap, reverse):
-        self.tree.delete(*self.tree.get_children())
-        values.sort(key=keymap[col], reverse=reverse)
-        for i, row in enumerate(values):
-            tag = "evenrow" if i % 2 == 0 else "oddrow"
-            self.tree.insert("", "end", values=row, tags=tag)
-
+    def sort(self, col, keymap, reverse):
+        self.current_rows.sort(key=keymap[col], reverse=reverse)
+        self.load_more_rows(reset=True)
         arrow = "  ▼" if self.sort_desc else "  ▲"
         for c in self.tree["columns"]:
-            text = c + arrow if c == col else c
-            self.tree.heading(c, text=text)
-        
+            self.tree.heading(c, text=c + arrow if c == col else c)
         self.config(cursor="")
         self.tree.config(cursor="")
         return "break"
 
-    
     def restart(self):
         try:
             target_entry = getattr(self, "customer_entry", None)
@@ -604,7 +646,8 @@ class InvoiceViewer(tk.Tk):
                 "search_names": self.search_names.get(),
                 "pdf_only": self.pdf_only.get(),
                 "sort_col": self.sort_col,
-                "sort_desc": self.sort_desc
+                "sort_desc": self.sort_desc,
+                "search_invoice_names": self.search_invoice_names.get()
             }
         except Exception:
             self.saved_filters = None
@@ -629,6 +672,11 @@ class InvoiceViewer(tk.Tk):
 
         self.columnconfigure(0, weight=0)
         self.rowconfigure(0, weight=0)
+
+        self.current_rows.clear()
+        self.result_count = 0
+        self.displayed_count = 0
+        self._loading_page = False
 
         gc.collect()
 
@@ -814,25 +862,18 @@ class AutoCompleteEntry(tk.Entry):
 
     
     def search(self, customer, invoice_prefix, narrow):
-        if narrow:
+        if narrow and self.root.current_rows:
             invoice_count = self.root.filter_rows(customer, invoice_prefix)
         else:
-            self.tree.delete(*self.tree.get_children())
             invoice_count, values = self.root.show_invoices(customer, invoice_prefix)
             self.root.sort_by(self.root.sort_col, values, header_pressed=False, watch_cursor=False)
-        
+
+        self.root.result_count = invoice_count
+        self.root.update_result_label()
         self.root.config(cursor="")
         self.config(cursor="")
         self.root.tree.config(cursor="")
-
-        if invoice_count == 0:
-            self.root.amount_label.config(text="No invoices found.")
-        elif invoice_count == 1:
-            self.root.amount_label.config(text="1 invoice found.")
-        else:
-            self.root.amount_label.config(text=f"{invoice_count} invoices found.")
         self.close_listbox()
-
 
     def listbox_move(self, dir):
         if not self.listbox:
@@ -1062,6 +1103,8 @@ class HelpPopup(tk.Toplevel):
         b("")
         b("Invoice  — Type in the Invoice box to narrow results to invoices whose number")
         b("starts with your entry")
+        b("Search Invoice Names  — Check this box to match your entry anywhere in the invoice")
+        b("number instead of only at the start. Typing '123' finds invoice 4123B as well as 1234")
         b("")
         b("Start / End Date  — Only invoices within this date range will be shown")
         b("")
