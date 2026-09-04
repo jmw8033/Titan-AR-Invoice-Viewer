@@ -297,7 +297,7 @@ class InvoiceViewer(tk.Tk):
         self.end_entry.bind("<<DateEntrySelected>>", self.customer_entry.on_select)
 
         self.all_companies = tk.BooleanVar()
-        self.all_companies_cb = ttk.Checkbutton(self.filter_frame, text="Search All Customers", variable=self.all_companies, command=self.customer_entry.toggle_all_companies, takefocus=False)
+        self.all_companies_cb = ttk.Checkbutton(self.filter_frame, text="View All Customers", variable=self.all_companies, command=self.customer_entry.toggle_all_companies, takefocus=False)
         self.all_companies_cb.grid(row=0, column=6, padx=15)
 
         self.pdf_only = tk.BooleanVar()
@@ -1092,7 +1092,7 @@ class HelpPopup(tk.Toplevel):
         b("Customer ID  — Type a customer ID into the Customer ID box. A suggestion list will")
         b("appear; click a result or press Enter to load that customer's invoices")
         b("")
-        b("Search All Customers  — Check this box to show invoices across all customers at once")
+        b("View All Customers  — Check this box to show invoices across all customers at once")
         b("In this mode the Customer ID box becomes a prefix filter: typing 'AC' shows every")
         b("customer whose ID starts with 'AC', rather than requiring an exact match")
         b("")
