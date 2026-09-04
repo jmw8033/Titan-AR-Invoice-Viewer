@@ -26,7 +26,8 @@ class InvoiceViewer(tk.Tk):
         self.invoices = [] 
         self.customer_ids = set() 
         self.sort_col = "Date"
-        self.sort_desc = True 
+        self.sort_desc = True # compatibility aliases for primary sort
+        self.sort_criteria = [("Date", True)]
         self.current_rows = []
         self.result_count = 0
         self.displayed_count = 0
@@ -154,11 +155,16 @@ class InvoiceViewer(tk.Tk):
             self.invoice_text.set(self.saved_filters["invoice"])
             self.search_invoice_names.set(self.saved_filters["search_invoice_names"])
 
-            self.sort_col
-            
             # Sorting state
-            self.sort_col = self.saved_filters.get("sort_col", "Date")
-            self.sort_desc = self.saved_filters.get("sort_desc", True)
+            saved_criteria = self.saved_filters.get("sort_criteria")
+            if saved_criteria:
+                self.sort_criteria = [(col, bool(desc)) for col, desc in saved_criteria]
+            else:
+                self.sort_criteria = [(
+                    self.saved_filters.get("sort_col", "Date"),
+                    self.saved_filters.get("sort_desc", True)
+                )]
+            self._sync_sort_aliases()
             
             if hasattr(self, "customer_entry"):
                 # 1. Remove the active trace to stop it from firing while we insert text
@@ -409,6 +415,7 @@ class InvoiceViewer(tk.Tk):
         self.tree.configure(yscrollcommand=self._on_tree_scroll)
         self.tree.bind("<<TreeviewSelect>>", self.update_selected_sum)
         self.tree.bind("<Double-1>", self.open_file)
+        self.tree.bind("<Button-3>", self.on_sort_header_right_click)
 
         self.style.configure("Treeview", rowheight=20) 
         self.tree.tag_configure("oddrow",  background="#f7f7f7")
@@ -578,25 +585,26 @@ class InvoiceViewer(tk.Tk):
         self.show_invoices("", "")
 
 
-    def sort_by(self, col, values=None, header_pressed=True, watch_cursor=True):
-        if header_pressed:
-            if col == self.sort_col:
-                self.sort_desc = not self.sort_desc
-            else:
-                self.sort_col = col
-                self.sort_desc = True
+    def _sync_sort_aliases(self):
+        """Keep the original single-sort attributes in sync with the primary criterion."""
+        if not self.sort_criteria:
+            self.sort_criteria = [("Date", True)]
+        self.sort_col, self.sort_desc = self.sort_criteria[0]
 
-        if values is not None:
-            self.current_rows = list(values)
-            self.result_count = len(self.current_rows)
 
+    def _sort_keymap(self):
         def invoice_key(inv):
             if inv.isdigit():
                 return [(0, int(inv))]
-            return [(1,)] + [(0, int(p)) if p.isdigit() else (1, p.lower()) for p in invoice_re.split(inv) if p]
+            return [(1,)] + [(0, int(p)) if p.isdigit() else (1, p.lower())
+                             for p in invoice_re.split(inv) if p]
 
-        money = lambda s: float(s.replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if s else 0
-        keymap = {
+        def money(value):
+            if not value:
+                return 0
+            return float(value.replace("$", "").replace("(", "-").replace(",", "").replace(")", ""))
+
+        return {
             "Customer": lambda x: x[0],
             "Company Name": lambda x: x[1],
             "Invoice": lambda x: invoice_key(str(x[2])),
@@ -610,24 +618,102 @@ class InvoiceViewer(tk.Tk):
             "Closed": lambda x: str(x[10]),
             "File Available": lambda x: x[11]
         }
-        reverse = self.sort_desc
-        if col in ("Customer", "Invoice", "Company Name"):
-            reverse = not reverse
 
+
+    def _effective_reverse(self, col, desc):
+        # Preserve the existing sort behavior for text/natural-sort columns.
+        return not desc if col in ("Customer", "Invoice", "Company Name") else desc
+
+
+    def update_sort_headings(self):
+        criteria = {col: (index, desc) for index, (col, desc) in enumerate(self.sort_criteria, start=1)}
+        for col in self.tree["columns"]:
+            if col == "Filepath":
+                self.tree.heading(col, text="")
+                continue
+            if col not in criteria:
+                self.tree.heading(col, text=col)
+                continue
+            index, desc = criteria[col]
+            arrow = "▼" if desc else "▲"
+            suffix = f"  {arrow}" if index == 1 else f"  {arrow} {index}"
+            self.tree.heading(col, text=col + suffix)
+
+
+    def _request_sort(self, watch_cursor=True):
         if watch_cursor:
             self.config(cursor="watch")
             self.tree.config(cursor="watch")
-            self.after(25, lambda: self.sort(col, keymap, reverse))
+            self.after(25, self.sort)
         else:
-            self.sort(col, keymap, reverse)
+            self.sort()
 
 
-    def sort(self, col, keymap, reverse):
-        self.current_rows.sort(key=keymap[col], reverse=reverse)
+    def sort_by(self, col, values=None, header_pressed=True, watch_cursor=True):
+        # Normal left-click: make this the only sort criterion. If it is already
+        # primary, toggle its direction to preserve the original click behavior.
+        if header_pressed:
+            existing = {name: desc for name, desc in self.sort_criteria}
+            if self.sort_criteria and col == self.sort_criteria[0][0]:
+                desc = not self.sort_criteria[0][1]
+            elif col in existing:
+                desc = existing[col]
+            else:
+                desc = True
+            self.sort_criteria = [(col, desc)]
+            self._sync_sort_aliases()
+
+        if values is not None:
+            self.current_rows = list(values)
+            self.result_count = len(self.current_rows)
+
+        self._request_sort(watch_cursor)
+
+
+    def on_sort_header_right_click(self, event):
+        if self.tree.identify_region(event.x, event.y) != "heading":
+            return
+
+        col_id = self.tree.identify_column(event.x)
+        if col_id == "#0":
+            return "break"
+        try:
+            col = self.tree["columns"][int(col_id[1:]) - 1]
+        except (ValueError, IndexError):
+            return "break"
+        if col == "Filepath" or col not in self._sort_keymap():
+            return "break"
+
+        shift_pressed = bool(event.state & 0x0001)
+        existing_index = next((i for i, (name, _) in enumerate(self.sort_criteria) if name == col), None)
+
+        if shift_pressed:
+            # The primary criterion cannot be removed; left-click another header to replace it.
+            if existing_index is None or existing_index == 0:
+                return "break"
+            del self.sort_criteria[existing_index]
+        elif existing_index is None:
+            self.sort_criteria.append((col, True))
+        else:
+            name, desc = self.sort_criteria[existing_index]
+            self.sort_criteria[existing_index] = (name, not desc)
+
+        self._sync_sort_aliases()
+        self._request_sort(watch_cursor=True)
+        return "break"
+
+
+    def sort(self):
+        keymap = self._sort_keymap()
+        # Python's sort is stable. Sorting from the least-important criterion back
+        # to the primary criterion produces the requested multi-column ordering.
+        for col, desc in reversed(self.sort_criteria):
+            key = keymap.get(col)
+            if key is not None:
+                self.current_rows.sort(key=key, reverse=self._effective_reverse(col, desc))
+
         self.load_more_rows(reset=True)
-        arrow = "  ▼" if self.sort_desc else "  ▲"
-        for c in self.tree["columns"]:
-            self.tree.heading(c, text=c + arrow if c == col else c)
+        self.update_sort_headings()
         self.config(cursor="")
         self.tree.config(cursor="")
         return "break"
@@ -647,6 +733,7 @@ class InvoiceViewer(tk.Tk):
                 "pdf_only": self.pdf_only.get(),
                 "sort_col": self.sort_col,
                 "sort_desc": self.sort_desc,
+                "sort_criteria": list(self.sort_criteria),
                 "search_invoice_names": self.search_invoice_names.get()
             }
         except Exception:
@@ -663,6 +750,7 @@ class InvoiceViewer(tk.Tk):
         self.customer_ids.clear()
         self.sort_col = "Date"
         self.sort_desc = True
+        self.sort_criteria = [("Date", True)]
         self.broken_companies.clear()
         self.broken_invoices.clear()
         
@@ -919,7 +1007,7 @@ class AutoCompleteEntry(tk.Entry):
             self.tree.focus(row)
             rows = [row]
 
-        heading = self.tree.heading(col_name)["text"].replace("  ▼", "").replace("  ▲", "").strip()
+        heading = col_name
 
         menu = tk.Menu(self.tree, tearoff=0)
         if len(rows) > 1:
@@ -1144,8 +1232,12 @@ class HelpPopup(tk.Toplevel):
         b("Both multi-row options paste straight into Excel as rows and columns")
 
         h("SORTING")
-        b("Click any column header to sort the table by that column. Click the same header")
-        b("again to reverse the sort direction. The active sort column is marked with ▲ or ▼")
+        b("Left-click a column header to make it the primary and only sort criterion. Left-click")
+        b("the current primary header again to reverse its direction")
+        b("Right-click another header to add it as the next sort criterion. Right-click any")
+        b("already-sorted header to reverse that criterion without changing its priority")
+        b("Shift + right-click a secondary sorted header to remove it from the sort")
+        b("The primary sort shows ▲ or ▼; secondary sorts show the same arrow plus 2, 3, etc.")
 
         h("SELECTING ROWS AND TOTALS")
         b("Click a row to select it. The totals bar at the bottom of the window shows:")
