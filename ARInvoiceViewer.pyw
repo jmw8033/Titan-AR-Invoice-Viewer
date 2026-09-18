@@ -480,6 +480,7 @@ class InvoiceViewer(tk.Tk):
         invoice_count = 0
         invoice_total = 0
         payments_total = 0
+        ar_total = 0
         values = []
 
         search = customer_input.lower()
@@ -533,17 +534,28 @@ class InvoiceViewer(tk.Tk):
             disc_amt = entry.get('Discounts', 0) or 0
             tot_amt = entry.get('Total', 0) or 0
             pay_amt = entry.get('Payments', 0) or 0
-            is_closed = entry.get('Closed', False)
 
-            invoice_total += tot_amt - disc_amt
+            # SQL Server BIT values normally arrive as bool/int, but normalize strings too
+            # so values such as "0" are not accidentally treated as True.
+            closed_value = entry.get('Closed', False)
+            if isinstance(closed_value, str):
+                is_closed = closed_value.strip().lower() in {"1", "true", "yes", "y", "closed"}
+            else:
+                is_closed = bool(closed_value)
+
+            # Total is already the final post-tax/post-discount invoice amount, so do not
+            # subtract Discounts again. Invoice/Payments totals still describe all visible
+            # rows; AR Total includes only invoices that are still open.
+            invoice_total += tot_amt
             payments_total += pay_amt
+            if not is_closed:
+                ar_total += tot_amt - pay_amt
 
             values.append((customer, company_name, invoice, date, state,
                            fmt(sub_amt), fmt(tax_amt), fmt(disc_amt), fmt(tot_amt), fmt(pay_amt),
                            "Yes" if is_closed else "No", has_filepath, filepath))
             invoice_count += 1
 
-        ar_total = invoice_total - payments_total
         self.invoice_total.set(f"Invoice Total: {fmt(invoice_total)}")
         self.payments_total.set(f"Payments Total: {fmt(payments_total)}")
         self.ar_total.set(f"AR Total: {fmt(ar_total)}")
@@ -567,7 +579,11 @@ class InvoiceViewer(tk.Tk):
         money = lambda s: float(s.replace("$", "").replace("(", "-").replace(",", "").replace(")", "")) if s else 0.0
         invoice_total = sum(money(row[8]) for row in self.current_rows)
         payments_total = sum(money(row[9]) for row in self.current_rows)
-        ar_total = invoice_total - payments_total
+        ar_total = sum(
+            money(row[8]) - money(row[9])
+            for row in self.current_rows
+            if str(row[10]).strip().lower() != "yes"
+        )
         fmt = lambda x: "$0.00" if not x else (f"${x:,.2f}" if x >= 0 else f"(${abs(x):,.2f})")
         self.invoice_total.set(f"Invoice Total: {fmt(invoice_total)}")
         self.payments_total.set(f"Payments Total: {fmt(payments_total)}")
@@ -1244,7 +1260,7 @@ class HelpPopup(tk.Toplevel):
         i("Selected Total — Sum of the 'Total' column for only the rows you have selected")
         i("Invoice Total  — Sum of the 'Total' column for all visible invoices")
         i("Payments Total — Sum of all payments received for all visible invoices")
-        i("AR Total       — The remaining balance (Invoice Total minus Payments Total)")
+        i("AR Total       — Remaining balance of visible invoices that are not closed")
         b("To select multiple rows hold Ctrl and click individual rows, or hold Shift and")
         b("click to select a continuous range")
 
