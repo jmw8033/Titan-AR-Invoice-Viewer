@@ -215,6 +215,7 @@ class InvoiceViewer(tk.Tk):
             conn = pymssql.connect(server="ACAPP1", user="titan", password="titan", database="titan")
 
             with conn.cursor(as_dict=True) as cur:
+                # Load invoice rows for the results table.
                 cur.execute("""
                     SELECT T.CustomerID, T.Ticket AS InvoiceNum, T.InvoiceDate, T.Subtotal, T.Total, T.Payments, 
                            T.County, T.Tax, T.Discounts, T.Closed, C.CompanyName
@@ -222,6 +223,14 @@ class InvoiceViewer(tk.Tk):
                     JOIN Customers C ON T.CustomerID = C.CustomerID
                 """)
                 data = cur.fetchall()
+
+                # Load the autocomplete/customer list independently from Tickets so
+                # customers with no invoices are still searchable/selectable.
+                cur.execute("""
+                    SELECT CustomerID, CompanyName
+                    FROM Customers
+                """)
+                customer_data = cur.fetchall()
 
             self.invoices = [row for row in data if row["CustomerID"] and row["InvoiceNum"] and row["InvoiceDate"] 
                             and row["Subtotal"] is not None]
@@ -236,7 +245,11 @@ class InvoiceViewer(tk.Tk):
                     
             self.broken_companies = [row for row in data if not (row["CustomerID"] and row["InvoiceNum"] and row["InvoiceDate"] 
                                      and row["Subtotal"] is not None)]
-            self.customer_ids = {(row["CustomerID"], row["CompanyName"], row["CustomerID"] in self.ignore_list) for row in self.invoices if row["CustomerID"] and row["CompanyName"]}
+            self.customer_ids = {
+                (str(row["CustomerID"]), str(row.get("CompanyName") or ""), str(row["CustomerID"]) in self.ignore_list)
+                for row in customer_data
+                if row.get("CustomerID")
+            }
             self.by_invoice = {str(row["InvoiceNum"]).strip(): row for row in self.invoices}
 
             t1 = time.perf_counter()
@@ -466,6 +479,7 @@ class InvoiceViewer(tk.Tk):
         else:
             self.amount_label.config(text=f"{total:,} invoices found.")
 
+
     def update_selected_sum(self, *_):
         total = 0
         for item in self.tree.selection():
@@ -561,6 +575,7 @@ class InvoiceViewer(tk.Tk):
         self.ar_total.set(f"AR Total: {fmt(ar_total)}")
         return invoice_count, values
 
+
     def filter_rows(self, customer_input, invoice_prefix):
         company_l = customer_input.lower()
         invoice_search = invoice_prefix.lower()
@@ -591,6 +606,7 @@ class InvoiceViewer(tk.Tk):
 
         self.load_more_rows(reset=True)
         return self.result_count
+
 
     def clear_filters(self):
         self.customer_entry.delete(0, "end")
@@ -733,6 +749,7 @@ class InvoiceViewer(tk.Tk):
         self.config(cursor="")
         self.tree.config(cursor="")
         return "break"
+
 
     def restart(self):
         try:
@@ -978,6 +995,7 @@ class AutoCompleteEntry(tk.Entry):
         self.config(cursor="")
         self.root.tree.config(cursor="")
         self.close_listbox()
+
 
     def listbox_move(self, dir):
         if not self.listbox:
