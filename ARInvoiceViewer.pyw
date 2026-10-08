@@ -51,6 +51,10 @@ class InvoiceViewer(tk.Tk):
         
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
+        # Any left-click in the window lets the autocomplete box close itself if the click was outside it.
+        # Bound once on the root window so it survives restarts.
+        self.bind("<Button-1>", self.on_window_click, add="+")
+
         # Loading info
         self.startup_sound()
         self.create_loading_screen()
@@ -138,8 +142,11 @@ class InvoiceViewer(tk.Tk):
         self.error_popup = ErrorPopup(self, self.broken_companies, self.broken_invoices, self.missing_invoices, self.duplicate_invoices)
         self.help_popup = HelpPopup(self)
 
+        # Ignore list image - lives in the right button frame, just left of the restart button
         self.ignore_photo = tk.PhotoImage(file="leaf.png")
-        self.ignore_label = tk.Label(self.filter_frame, image=self.ignore_photo)
+        self.ignore_label = ttk.Label(self.right_button_frame, image=self.ignore_photo)
+        if not self.ignoring:  # keep the leaf showing after a restart
+            self.show_ignore_leaf()
         self.bind("<Control-F9>", self.add_ignore)
         self.bind("<Control-F10>", self.toggle_ignore_list)
         
@@ -809,14 +816,28 @@ class InvoiceViewer(tk.Tk):
     def toggle_ignore_list(self, event):
         self.ignoring = not self.ignoring
         if self.ignoring:
-            self.ignore_label.grid_forget()
+            self.ignore_label.pack_forget()
         else:
-            self.ignore_label.grid(row=0, column=10, sticky="e", padx=10)
-            
+            self.show_ignore_leaf()
+
         target_entry = getattr(self, "customer_entry", None)
         if target_entry:
             target_entry.on_select()
         return "break"
+
+
+    def show_ignore_leaf(self):
+        # Always sits immediately to the left of the restart (⭮) button
+        self.ignore_label.pack(side="left", padx=(0, 6), before=self.refresh_button)
+
+
+    def on_window_click(self, event):
+        entry = getattr(self, "customer_entry", None)
+        try:
+            if entry is not None and entry.winfo_exists():
+                entry.on_window_click(event)
+        except tk.TclError:
+            pass
 
 
     def add_ignore(self, event):
@@ -869,17 +890,19 @@ class AutoCompleteEntry(tk.Entry):
         self.customer_ids = root.customer_ids
         self.tree = root.tree
         self.root = root
-        self.listbox = None
+        self.listbox = None  # Treeview inside the suggestion popup (None when closed)
+        self.popup = None    # Frame holding the listbox, scrollbar and border
         self.customer = tk.StringVar()
         self.prev_customer = ""
-        self["textvariable"] = self.customer 
-        self.search_job = None 
+        self["textvariable"] = self.customer
+        self.search_job = None
 
         self.text_trace = self.customer.trace_add("write", self.show_suggestions)
         self.bind("<Return>", self.on_select)
         self.bind("<Up>", lambda *_: self.listbox_move("up"))
         self.bind("<Down>", lambda *_: self.listbox_move("down"))
         self.bind("<Escape>", self.close_listbox)
+        self.bind("<Button-1>", self.on_entry_click, add="+")
         self.tree.bind("<Button-3>", self.show_cell_menu, True)
 
 
@@ -889,31 +912,85 @@ class AutoCompleteEntry(tk.Entry):
             self.close_listbox()
             return
 
+        text_l = text.lower()
+        search_names = self.root.search_names.get()
         matches = [w for w in self.customer_ids
-                   if (w[0].lower().startswith(text.lower())
-                       or (self.root.search_names.get() and text.lower() in w[1].lower()))
+                   if (w[0].lower().startswith(text_l)
+                       or (search_names and text_l in w[1].lower()))
                    and (not self.root.ignoring or not w[2])]
         if not matches:
             self.close_listbox()
             return
 
         if self.listbox is None:
-            self.listbox = ttk.Treeview(self.root, columns=("id", "name"), show="tree", height=8)
-            self.listbox.heading("id", text="ID")
-            self.listbox.heading("name", text="Name")
-            self.listbox.bind("<ButtonRelease-1>", self.on_select)
-            self.listbox.bind("<Return>", self.on_select)
-            self.listbox.bind("<Up>", lambda e: self.listbox_move("up"))
-            self.listbox.bind("<Down>", lambda e: self.listbox_move("down"))
+            self.build_listbox()
 
         self.listbox.delete(*self.listbox.get_children())
-        matches.sort()  
-        for w in matches:
-            self.listbox.insert("", tk.END, values=(w[0], w[1]))
+        matches.sort()
+        for i, w in enumerate(matches):
+            self.listbox.insert("", tk.END, values=(w[0], w[1]), tags=("even" if i % 2 == 0 else "odd",))
+        self.listbox.configure(height=min(8, len(matches)))
 
-        x = self.winfo_x()
-        y = self.winfo_y() + self.winfo_height() + 7
-        self.listbox.place(x=x, y=y)
+        # position the popup just under the entry widget
+        x = self.winfo_rootx() - self.root.winfo_rootx()
+        y = self.winfo_rooty() - self.root.winfo_rooty() + self.winfo_height() + 2
+        self.popup.place(x=x, y=y)
+        self.popup.lift()
+
+
+    def build_listbox(self):
+        # Popup = 1px grey border > [ID | Name list] + vertical scrollbar
+        style = ttk.Style(self.root)
+        style.configure("Suggest.Treeview", rowheight=20)
+
+        self.popup = tk.Frame(self.root, background="#7a7a7a")
+        inner = tk.Frame(self.popup, background="white")
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # show="" hides the empty tree column (the old left-side gap) and the headings
+        self.listbox = ttk.Treeview(inner, columns=("id", "name"), show="", height=8, selectmode="browse", style="Suggest.Treeview")
+        scrollbar = ttk.Scrollbar(inner, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.pack(side="left", fill="both", expand=True)
+
+        # Size columns once from all IDs/names so the box doesn't change width while typing
+        f = font.nametofont("TkDefaultFont")
+        longest = lambda idx: sorted({w[idx] for w in self.customer_ids}, key=len, reverse=True)[:30]
+        id_width = max([f.measure(s) for s in longest(0)] + [f.measure("WWWWW")]) + 16
+        name_width = max([f.measure(s) for s in longest(1)] + [0]) + 16
+        name_width = max(240, min(name_width, 420))
+        self.listbox.column("id", width=id_width, minwidth=id_width, stretch=False, anchor="w")
+        self.listbox.column("name", width=name_width, minwidth=100, stretch=True, anchor="w")
+
+        # Thin divider line between the ID and Name columns
+        tk.Frame(self.listbox, background="#b5b5b5", width=1).place(x=id_width, y=0, width=1, relheight=1)
+
+        self.listbox.tag_configure("even", background="#ffffff")
+        self.listbox.tag_configure("odd", background="#f2f5f9")
+
+        self.listbox.bind("<ButtonRelease-1>", self.on_select)
+        self.listbox.bind("<Return>", self.on_select)
+        self.listbox.bind("<Up>", lambda e: self.listbox_move("up"))
+        self.listbox.bind("<Down>", lambda e: self.listbox_move("down"))
+        self.listbox.bind("<Escape>", self.close_listbox)
+
+
+    def on_entry_click(self, *_):
+        # Clicking back into the box reopens the suggestions if there are matches
+        if self.listbox is None and not self.root.all_companies.get():
+            self.after_idle(self.show_suggestions)
+
+
+    def on_window_click(self, event):
+        # Close the suggestions when the click lands anywhere other than the entry or the popup
+        if self.popup is None:
+            return
+        clicked = str(event.widget)
+        popup = str(self.popup)
+        if clicked == str(self) or clicked == popup or clicked.startswith(popup + "."):
+            return
+        self.close_listbox()
 
 
     def toggle_all_companies(self):
@@ -933,9 +1010,13 @@ class AutoCompleteEntry(tk.Entry):
 
 
     def close_listbox(self, *_):
-        if self.listbox:
-            self.listbox.destroy()
-            self.listbox = None
+        if self.popup is not None:
+            try:
+                self.popup.destroy()
+            except tk.TclError:
+                pass
+        self.popup = None
+        self.listbox = None
 
 
     def on_select(self, *_, source=None):
@@ -1212,7 +1293,8 @@ class HelpPopup(tk.Toplevel):
 
         h("SEARCHING FOR INVOICES")
         b("Customer ID  — Type a customer ID into the Customer ID box. A suggestion list will")
-        b("appear; click a result or press Enter to load that customer's invoices")
+        b("appear; click a result or press Enter to load that customer's invoices. Clicking")
+        b("anywhere else closes the list; click back into the Customer ID box to reopen it")
         b("")
         b("View All Customers  — Check this box to show invoices across all customers at once")
         b("In this mode the Customer ID box becomes a prefix filter: typing 'AC' shows every")
